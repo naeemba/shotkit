@@ -14,7 +14,7 @@ optdepends=(
   'glib2: Delete button (gio trash)'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('2c12c9e6dee26e8527af2ed59165b21242aff66007b68c7dfd763747c62438fc')
 
 package() {
   cd "$pkgname-$pkgver"
