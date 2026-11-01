@@ -8,6 +8,9 @@
 # drops frames that barely changed, and puts the stitcher's note in the toast.
 # Also: the save directory and its config file, and the focused output lookup.
 #   tests/shotkit.test.sh
+# The checks read "cond && cond || fail", and fail exits; the stubs are written
+# with single-quoted $ on purpose.
+# shellcheck disable=SC2015,SC2016,SC2012
 set -uo pipefail
 directory=$(cd "$(dirname "$0")/.." && pwd)
 temporary=$(mktemp -d)
@@ -162,7 +165,7 @@ picked && has "stitch 3" || fail "a stale pid file blocked a new capture"
 
 # The output mode asks Hyprland for the focused monitor; with no compositor it
 # can ask, slurp -o picks one.
-HYPRLAND_INSTANCE_SIGNATURE=test run output
+HYPRLAND_INSTANCE_SIGNATURE="test" run output
 has "grim -o DP-2 $shot" || fail "output did not grab the focused monitor"
 run output
 has "slurp -d -b #1e1e2e66 -c #b4befeff -s #00000000 -w 2 -o" && has "grim -g 0,0 10x10 $shot" || fail "output without Hyprland or Sway did not let slurp pick"
