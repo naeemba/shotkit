@@ -1,0 +1,22 @@
+# Maintainer: Naeem Baghi <baghinaeem@gmail.com>
+pkgname=shotkit
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Screenshots for wlroots Wayland compositors: region, output, full screen and scrolling capture, with an actionable notification"
+arch=(any)
+url="https://github.com/naeemba/shotkit"
+license=(MIT)
+depends=(bash grim slurp wl-clipboard libnotify python python-pillow jq)
+optdepends=(
+  'quickshell: outline and Start/Stop bar for scrolling captures'
+  'satty: Edit button'
+  'xdg-utils: Folder button'
+  'glib2: Delete button (gio trash)'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname-$pkgver"
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+}

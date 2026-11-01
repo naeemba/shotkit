@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y python3-pil shellcheck
+      - run: shellcheck shotkit tests/shotkit.test.sh
+      - run: make test
+      - run: make install DESTDIR="$RUNNER_TEMP/root" PREFIX=/usr && test -x "$RUNNER_TEMP/root/usr/bin/shotkit"

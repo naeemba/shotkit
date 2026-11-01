@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# shotkit: screenshots for wlroots Wayland compositors (Hyprland, Sway, ...).
+#
+#   shotkit [region|output|full|scroll]   (default: region)
+#
+# The image is saved, copied to the clipboard, and announced by a notification
+# with Edit (also a click on it), Copy, Folder and Delete. Edit opens Satty and
+# saves over the same file; the edited image is copied again.
+#
+# scroll: pick a region; it stays outlined with a Start bar (overlay/shell.qml,
+# run as its own Quickshell instance). Start (Enter, or the same shortcut again)
+# begins grabbing; scroll the page by hand, then Stop (the bar's button, or the
+# shortcut again) finishes. The frames are stitched by scroll-stitch.py.
+#
+# Settings, from the environment or the config file
+# ($XDG_CONFIG_HOME/shotkit/config, a shell snippet; what it sets wins):
+#   SHOTKIT_DIR         where screenshots go (default: $XDG_PICTURES_DIR/Screenshots)
+#   SHOTKIT_SLURP_ARGS  slurp's look, as one string of options
+#   SHOTKIT_SCROLL_KEY  the shortcut named in the scrolling capture's bar
+set -u
+mode=${1:-region}
+case "$mode" in region|output|full|scroll) ;; *) echo "usage: shotkit [region|output|full|scroll]" >&2; exit 2;; esac
+
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+# shellcheck source=/dev/null
+[ ! -r "$config_home/shotkit/config" ] || . "$config_home/shotkit/config"
+if [ -z "${SHOTKIT_DIR:-}" ]; then
+  # shellcheck source=/dev/null
+  [ -n "${XDG_PICTURES_DIR:-}" ] || [ ! -r "$config_home/user-dirs.dirs" ] || . "$config_home/user-dirs.dirs"
+  SHOTKIT_DIR=${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots
+fi
+slurp_arguments=${SHOTKIT_SLURP_ARGS:--d -b #1e1e2e66 -c #b4befeff -s #00000000 -w 2}
+mkdir -p "$SHOTKIT_DIR"
+file="$SHOTKIT_DIR/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
+
+# The stitcher and the overlay sit next to this script in a checkout, or in
+# ../share/shotkit once installed.
+here=$(dirname "$(readlink -f "$0")")
+if [ -d "$here/overlay" ]; then share=$here; else share=$here/../share/shotkit; fi
+
+# Scroll frames go to disk, not the tmpfs runtime dir: a minute of full-screen frames is over 1 GB.
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/shotkit/scroll
+# The pid and stop files go to the runtime dir, cleared at logout, so a capture
+# killed mid-way never leaves a pid that a later process could be taken for.
+state=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/shotkit-scroll
+title="Saved and copied"
+
+# shellcheck disable=SC2086 # the options are meant to split
+select_region() { slurp $slurp_arguments "$@"; }
+
+# The focused output's name, from the compositor; empty when it cannot say.
+focused_output() {
+  if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+    hyprctl monitors -j | jq -r '.[] | select(.focused) | .name'
+  elif [ -n "${SWAYSOCK:-}" ]; then
+    swaymsg -t get_outputs | jq -r '.[] | select(.focused) | .name'
+  fi
+}
+
+# Show the toast for $1 and act on the button pressed. Runs in the background.
+# -t 0: notify-send waits until the toast closes; with a timeout it would give
+# up at that time even while the toast is still up, and a late click would go
+# nowhere. The 5 minute timeout only covers a notification server that never
+# closes it.
+offer() {
+  local shot=$1 action before
+  action=$(timeout 300 notify-send -a Screenshot -i "$shot" -t 0 \
+    --action=default=Edit --action=edit=Edit --action=copy=Copy --action=folder=Folder --action=delete=Delete \
+    "$2" "$shot")
+  case "$action" in
+    default|edit)
+      before=$(stat -c %.9Y "$shot")
+      satty --filename "$shot" --output-filename "$shot"
+      if [ "$(stat -c %.9Y "$shot")" != "$before" ]; then
+        wl-copy --type image/png < "$shot"
+        offer "$shot" "Edited and copied"
+      fi;;
+    copy)   wl-copy --type image/png < "$shot";;
+    folder) xdg-open "$(dirname "$shot")";;
+    delete) gio trash "$shot";;
+  esac
+}
+
+# Tell the overlay instance to record or close. A call that worked prints nothing.
+overlay() { [ -n "${overlay_pid:-}" ] && [ -z "$(qs ipc --pid "$overlay_pid" call scrollCapture "$1" 2>&1)" ]; }
+
+# Start the overlay for GEOMETRY and wait, up to 5 s, for it to say it is up
+# ($state/ready) or to exit. Without it, a notification says to use the shortcut.
+open_overlay() {
+  local tick=0
+  SHOTKIT_GEOMETRY=$1 SHOTKIT_STATE=$state SHOTKIT_SCROLL_KEY=${SHOTKIT_SCROLL_KEY:-} \
+    qs -p "$share/overlay" >/dev/null 2>&1 &
+  overlay_pid=$!
+  while [ ! -e "$state/ready" ] && kill -0 "$overlay_pid" 2>/dev/null && [ "$tick" -lt 50 ]; do
+    sleep 0.1; tick=$((tick + 1))
+  done
+  [ -e "$state/ready" ] && return
+  overlay_pid=
+  notify-send -a Screenshot -t 4000 "Scrolling capture" "Press the shortcut again to start, and again to stop"
+}
+
+close_overlay() {
+  [ -n "${overlay_pid:-}" ] || return 0
+  overlay close || kill "$overlay_pid" 2>/dev/null
+  overlay_pid=
+}
+
+# Outline the region and wait up to 5 minutes for Start ($state/start, from the
+# overlay or a second press); Cancel ($state/cancel) or the wait running out
+# ends the script with nothing saved. Then grab the region every 0.2 s until
+# Stop ($state/stop, the overlay or a third press), 300 frames, or 10 minutes.
+# Cancel wins at any point, even after Start, since the overlay closes on it.
+# A frame under 1 % different from the last one kept (a blinking cursor, a
+# spinner, a pause in scrolling) is overwritten by the next grab; head stops
+# cmp early on a real scroll.
+scroll_capture() {
+  local geometry=$1 frames=$cache/frames count=0 tick=0 frame=$cache/next.ppm previous='' limit='' note status
+  rm -rf "$cache" "$state"; mkdir -p "$frames" "$state"; echo $$ > "$state/pid"
+  trap 'close_overlay; rm -rf "$cache" "$state"' EXIT
+  open_overlay "$geometry"
+  until [ -e "$state/start" ] || [ -e "$state/cancel" ] || [ "$tick" -ge 3000 ]; do sleep 0.1; tick=$((tick + 1)); done
+  [ -e "$state/start" ] && [ ! -e "$state/cancel" ] || exit 0
+  # Let the compositor commit the frame that hides a bar inside the region
+  # before the first grab, which is always kept.
+  overlay record; sleep 0.1
+  tick=0
+  while [ ! -e "$state/stop" ] && [ ! -e "$state/cancel" ] && [ "$count" -lt 300 ] && [ "$tick" -lt 3000 ]; do
+    grim -t ppm -g "$geometry" "$frame" || break
+    [ -n "$limit" ] || limit=$(( $(stat -c %s "$frame") / 100 + 1 ))
+    if [ -z "$previous" ] || [ "$(cmp -l "$frame" "$previous" | head -n "$limit" | wc -l)" -ge "$limit" ]; then
+      printf -v previous '%s/%05d.ppm' "$frames" "$count"
+      mv "$frame" "$previous"; count=$((count + 1))
+    fi
+    tick=$((tick + 1))
+    sleep 0.2
+  done
+  [ ! -e "$state/cancel" ] || exit 0
+  close_overlay
+  notify-send -a Screenshot -t 2000 "Scrolling capture" "Stitching $count frames"
+  # The stitcher's note (frames it had to leave out) goes into the toast.
+  note=$(python3 "$share/scroll-stitch.py" "$file" "$frames"/*.ppm 2>&1 >/dev/null)
+  status=$?
+  [ -z "$note" ] || title="$title ($note)"
+  return $status
+}
+
+case "$mode" in
+  region) geometry=$(select_region) || exit 0; capture=(grim -g "$geometry");;
+  output) # The focused output, or one picked with the pointer when the compositor cannot say.
+          output_name=$(focused_output 2>/dev/null)
+          if [ -n "$output_name" ]; then capture=(grim -o "$output_name")
+          else geometry=$(select_region -o) || exit 0; capture=(grim -g "$geometry"); fi;;
+  full)   capture=(grim);;
+  scroll) # A capture already running: this press starts it, or stops it once started.
+          if [ -e "$state/pid" ] && kill -0 "$(cat "$state/pid")" 2>/dev/null; then
+            if [ -e "$state/start" ]; then touch "$state/stop"; else touch "$state/start"; fi
+            exit 0
+          fi
+          geometry=$(select_region) || exit 0
+          scroll_capture "$geometry" || { notify-send -a Screenshot "Scrolling capture failed"; exit 1; }
+          capture=();;
+esac
+[ ${#capture[@]} -eq 0 ] || "${capture[@]}" "$file"
+wl-copy --type image/png < "$file"
+offer "$file" "$title" </dev/null >/dev/null 2>&1 &
