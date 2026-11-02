@@ -29,6 +29,40 @@ shotkit scroll   # a scrolling capture of a region
   blinking cursors and translucent windows. The outline and bar are drawn
   outside the region, so they never end up in the image.
 
+## Screenshots
+
+A scrolling capture from start to finish: pick the region, Start, scroll,
+Stop, and the stitched image is saved and copied.
+
+![A scrolling capture: the region is picked, recorded while the page scrolls, and saved](docs/images/scroll-capture.webp)
+
+Picking a region with slurp:
+
+![A region being dragged out with slurp, the rest of the screen dimmed](docs/images/region-select.png)
+
+The notification after a shot, with Edit, Copy, Folder and Delete:
+
+![The notification: a thumbnail, the saved path and four buttons](docs/images/toast.png)
+
+A scrolling capture waiting for Start, the region outlined and the bar below
+it:
+
+![The region outlined, with a bar offering Start and Cancel](docs/images/scroll-overlay.png)
+
+Recording: the outline turns red and the bar offers Stop. Both sit outside the
+region, so neither ends up in the image.
+
+![The red outline while the page scrolls, with a Stop button](docs/images/scroll-recording.png)
+
+The stitched result, one image of everything scrolled through (click for full
+size):
+
+<a href="docs/images/scroll-result.png"><img src="docs/images/scroll-result.png" width="360" alt="A tall image stitched from the scrolled frames"></a>
+
+Edit opens the shot in Satty:
+
+![The shot open in Satty with a box and an arrow drawn on it](docs/images/satty.png)
+
 ## Dependencies
 
 Required: `bash`, `grim`, `slurp`, `wl-clipboard`, `libnotify` (0.7.12 or
